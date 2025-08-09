@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ROS2 Arrow Controller</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <script src="https://cdn.jsdelivr.net/npm/roslib/build/roslib.min.js"></script>
+  <style>
+    body { font-family: sans-serif; text-align: center; margin-top: 50px; }
+    .btn {
+      width:  300px;   
+      height: 300px;  
+      font-size: 3em; 
+      margin: 10px;   
+      cursor: pointer;
+    }
+    .row { display: flex; justify-content: center; }
+
+    input[type="range"] {
+      width: 80%;
+      height: 40px;
+      accent-color: #007bff;
+    }
+
+    /* Chrome/Edge用: スライダーのつまみを大きく */
+    input[type="range"]::-webkit-slider-thumb {
+      width:  40px;
+      height: 40px;
+      background: #007bff;
+      border-radius: 50%;
+      cursor: pointer;
+      border: 2px solid #333;
+    }
+
+    /* Firefox用 */
+    input[type="range"]::-moz-range-thumb {
+      width:  40px;
+      height: 40px;
+      background: #007bff;
+      border-radius: 50%;
+      cursor: pointer;
+      border: 2px solid #333;
+    }
+  </style>
+</head>
+<body>
+  <h1>Controller</h1>
+
+  <!-- 送信速度表示エリアをさらに大きく -->
+  <div id="speedDisplay" style="font-size:1.5em; margin-bottom:30px; font-weight:bold;">
+    速度: linear=0.0, 角速度=0.0
+  </div>
+
+  <!-- 速度調整スライダー追加 -->
+  <div style="margin: 30px 0;">
+    <!-- <label for="speedSlider" style="font-size:2em;">速度調整</label><br> -->
+    <span id="speedValue" style="font-size:2em;">0.5</span>
+    <div>
+        <input type="range" id="speedSlider" min="0.1" max="1.0" step="0.1" value="0.5">
+    </div>
+  </div>
+
+  <div class="row">
+    <button class="btn"
+      style="font-size:7em;"
+      ontouchstart="touchSetActive(event, 'turn_left')" onmousedown="setActive('turn_left')"
+      ontouchend="touchClearActive(event, 'turn_left')" onmouseup="clearActive('turn_left')">⟲</button>
+    <button class="btn"
+      ontouchstart="touchSetActive(event, 'up')" onmousedown="setActive('up')"
+      ontouchend="touchClearActive(event, 'up')" onmouseup="clearActive('up')">↑</button>
+    <button class="btn"
+      style="font-size:7em;"
+      ontouchstart="touchSetActive(event, 'turn_right')" onmousedown="setActive('turn_right')"
+      ontouchend="touchClearActive(event, 'turn_right')" onmouseup="clearActive('turn_right')">⟳</button>
+  </div>
+  <div class="row">
+    <button class="btn"
+      ontouchstart="touchSetActive(event, 'left')" onmousedown="setActive('left')"
+      ontouchend="touchClearActive(event, 'left')" onmouseup="clearActive('left')">←</button>
+    <button class="btn" onclick="sendCmd(0,0,0)">■</button>
+    <button class="btn"
+      ontouchstart="touchSetActive(event, 'right')" onmousedown="setActive('right')"
+      ontouchend="touchClearActive(event, 'right')" onmouseup="clearActive('right')">→</button>
+  </div>
+  <div class="row">
+    <button class="btn"
+      ontouchstart="touchSetActive(event, 'down')" onmousedown="setActive('down')"
+      ontouchend="touchClearActive(event, 'down')" onmouseup="clearActive('down')">↓</button>
+  </div>
+
+  <div class="row">
+    <button class="btn"
+      style="font-size:7em;"
+      ontouchstart="poseZUP()">←</button>
+    <span id="poseZValue" style="font-size:3em; margin: 0 30px;">z=0.0</span>
+    <button class="btn"
+      style="font-size:7em;"
+      ontouchstart="poseZDown()">→</button>
+  </div>
+
+  <script>
+    // Raspberry Pi の IP に置き換える
+    var ros = new ROSLIB.Ros({
+      url : 'ws://192.168.0.8:9090'
+    });
+
+    ros.on('connection', function() {
+      console.log('✅ Connected to websocket server.');
+    });
+
+    ros.on('error', function(error) {
+      console.error('❌ Error connecting:', error);
+    });
+
+    ros.on('close', function() {
+      console.log('🔌 Connection closed.');
+    });
+
+    // Publisher（Twist型）
+    var cmdVel = new ROSLIB.Topic({
+      ros : ros,
+      name : '/cmd_vel',
+      messageType : 'geometry_msgs/Twist'
+    });
+
+    // Pose Publisher追加
+    var posePub = new ROSLIB.Topic({
+      ros : ros,
+      name : '/body_pose',
+      messageType : 'geometry_msgs/Pose'
+    });
+
+    // 押されているボタン状態を管理（旋回追加）
+    let pressed = { up: false, down: false, left: false, right: false, turn_left: false, turn_right: false };
+
+    // スライダー値取得
+    function getSpeed() {
+      return parseFloat(document.getElementById('speedSlider').value);
+    }
+
+    // スライダー値表示更新
+    document.getElementById('speedSlider').addEventListener('input', function() {
+      document.getElementById('speedValue').textContent = this.value;
+    });
+
+    // 合算してcmd_vel送信（平行移動＋旋回対応）
+    function sendCombinedCmd() {
+      let linear_x = 0;
+      let linear_y = 0;
+      let angular_z = 0;
+      const speed = getSpeed(); // スライダー値を取得
+      if (pressed.up)        linear_x += speed;
+      if (pressed.down)      linear_x -= speed;
+      if (pressed.left)      linear_y += speed;
+      if (pressed.right)     linear_y -= speed;
+      if (pressed.turn_left)  angular_z += speed;
+      if (pressed.turn_right) angular_z -= speed;
+
+      var twist = new ROSLIB.Message({
+        linear: { x: linear_x, y: linear_y, z: 0 },
+        angular: { x: 0, y: 0, z: angular_z }
+      });
+      cmdVel.publish(twist);
+      updateSpeedDisplay(linear_x, linear_y, angular_z);
+      console.log(`📨 Sent: linear_x=${linear_x}, linear_y=${linear_y}, 角速度=${angular_z}`);
+    }
+
+    // 送信速度表示を更新する関数（平行移動＋旋回対応）
+    function updateSpeedDisplay(linear_x, linear_y, angular_z) {
+      document.getElementById('speedDisplay').textContent =
+        `速度: x=${linear_x.toFixed(1)}, y=${linear_y.toFixed(1)}, 角速度=${angular_z.toFixed(1)}`;
+    }
+
+    // Pose送信関数（例: x, y, z, yawを指定して送信）
+    function sendPose(x, y, z, yaw) {
+      // yawからクォータニオン計算
+      const halfYaw = yaw / 2;
+      const qz = Math.sin(halfYaw);
+      const qw = Math.cos(halfYaw);
+
+      var poseMsg = new ROSLIB.Message({
+        position: { x: x, y: y, z: z },
+        orientation: { x: 0, y: 0, z: qz, w: qw }
+      });
+      posePub.publish(poseMsg);
+      console.log(`📨 Pose sent: x=${x}, y=${y}, z=${z}, yaw=${yaw}`);
+    }
+
+    // 例: ボタンでPose送信（必要に応じてUI追加）
+    // <button class="btn" onclick="sendPose(1,0,0,0)">Pose送信</button>
+
+    // 操作状態管理
+    let activeBtn = null;
+
+    function setActive(dir) {
+      pressed[dir] = true;
+      sendCombinedCmd();
+    }
+
+    function clearActive(dir) {
+      pressed[dir] = false;
+      sendCombinedCmd();
+    }
+
+    function touchSetActive(event, dir) {
+      event.preventDefault();
+      setActive(dir);
+    }
+
+    function touchClearActive(event, dir) {
+      event.preventDefault();
+      clearActive(dir);
+    }
+
+    // 定期的に合算値送信
+    setInterval(sendCombinedCmd, 200);
+
+    let pose = { x: 0, y: 0, z: 0, yaw: 0 }; // pose値を管理
+
+    function updatePoseZValue() {
+      document.getElementById('poseZValue').textContent = `z=${pose.z.toFixed(2)}`;
+    }
+
+    // poseZUP/poseZDownで値更新
+    function poseZDown() {
+      pose.z -= 0.05;
+      sendPose(pose.x, pose.y, pose.z, pose.yaw);
+      updatePoseZValue();
+    }
+
+    function poseZUP() {
+      pose.z += 0.05;
+      sendPose(pose.x, pose.y, pose.z, pose.yaw);
+      updatePoseZValue();
+    }
+
+    function resizeButtons() {
+      // 画面幅・高さを取得
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      // ボタンサイズを計算（例: 画面幅の1/4、高さの1/4）
+      const size = Math.min(w, h) / 4;
+      // ボタン要素を取得してサイズ変更
+      document.querySelectorAll('.btn').forEach(btn => {
+        btn.style.width = size + 'px';
+        btn.style.height = size + 'px';
+        btn.style.fontSize = (size * 0.3) + 'px';
+      });
+      // 速度表示も調整
+      document.getElementById('speedDisplay').style.fontSize = (size * 0.2) + 'px';
+    }
+    // 初回・リサイズ時に実行
+    window.addEventListener('resize', resizeButtons);
+    window.addEventListener('DOMContentLoaded', () => {
+      resizeButtons();
+      updatePoseZValue();
+    });
+  </script>
+</body>
+</html>
